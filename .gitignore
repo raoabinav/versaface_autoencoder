@@ -54,11 +54,12 @@ ckpts
 *.npz
 *.tar.gz
 *.ckpt
-*.wav
 *.flac
 pretrained/wenet/*conformer_exp
 pretrained/bigvgan/args.json
+*.wav
 !egs/tts/VALLE/prompt_examples/*.wav
+!models/tts/metis/test audios/*.wav
 
 # Runtime data dirs
 processed_data
