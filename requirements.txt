@@ -1,0 +1,29 @@
+# Core dependencies for semantic_8d_wrappers
+# Minimal set to reproduce the environment
+
+# PyTorch (CPU or CUDA - adjust based on your system)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# HuggingFace (for models and transformers)
+transformers>=4.30.0
+huggingface-hub>=0.16.0
+safetensors>=0.3.0
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.6.0  # Used in vocos.py (also dependency of librosa)
+
+# Utilities
+einops>=0.6.0  # Used in maskgct_s2a.py
+json5>=0.9.0   # Used in utils/util.py for config loading
+ruamel.yaml>=0.18.0  # Used in utils/util.py for YAML config loading
+
+# Optional: Jupyter for notebook
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
