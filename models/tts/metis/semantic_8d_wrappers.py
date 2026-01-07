@@ -2,6 +2,7 @@
 
 import os
 import warnings
+import logging
 from typing import Optional, Tuple
 
 import numpy as np
@@ -13,9 +14,24 @@ from models.tts.metis.audio_tokenizer import AudioTokenizer
 from models.tts.maskgct.maskgct_utils import build_s2a_model
 from huggingface_hub import snapshot_download
 
-# Constants
-MAX_PROMPT_LENGTH = 150  # Max prompt tokens (~3 seconds at 50Hz)
-SEMANTIC_RATE_HZ = 50  # Semantic code rate in Hz
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Audio processing constants
+SEMANTIC_SAMPLE_RATE = 16000  # Hz - Input sample rate for semantic encoding
+ACOUSTIC_SAMPLE_RATE = 24000  # Hz - Input/output sample rate for acoustic processing
+OUTPUT_SAMPLE_RATE = 24000  # Hz - Final output waveform sample rate
+SEMANTIC_RATE_HZ = 50  # Semantic code rate in Hz (tokens per second)
+
+# Model architecture constants
+W2V_BERT_LAYER = 17  # Layer index for feature extraction from w2v-bert-2.0
+ACOUSTIC_QUANTIZERS = 12  # Number of quantizers in acoustic codec
+SEMANTIC_CODEBOOK_SIZE = 8192  # Size of semantic codebook
+
+# Prompt length constants
+MAX_PROMPT_LENGTH_TOKENS = 100  # Maximum prompt tokens (recommended: 1-2 seconds)
+MAX_PROMPT_LENGTH_SECONDS = 2.0  # Maximum prompt duration in seconds
+PROMPT_LENGTH_RATIO = 3  # Prompt should be at most 1/N of semantic length
 
 
 class Metis8dEncoder:
@@ -87,10 +103,24 @@ class Metis8dEncoder:
 
     @torch.no_grad()
     def _compute_ssl_feat(self, wav_16k: np.ndarray) -> torch.Tensor:
-        """Compute normalized SSL features from 16kHz audio."""
+        """
+        Compute normalized SSL features from 16kHz audio.
+        
+        Args:
+            wav_16k: Audio waveform at 16kHz sample rate
+            
+        Returns:
+            Normalized SSL features tensor of shape [1, T, 1024]
+            
+        Raises:
+            RuntimeError: If audio processing fails
+        """
+        if len(wav_16k) == 0:
+            raise ValueError("Input audio is empty")
+        
         inputs = self.processor(
             wav_16k,
-            sampling_rate=16000,
+            sampling_rate=SEMANTIC_SAMPLE_RATE,
             return_tensors="pt",
         )
         input_features = inputs["input_features"][0].unsqueeze(0).to(self.device)
@@ -101,7 +131,7 @@ class Metis8dEncoder:
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        feat = vq_emb.hidden_states[17]  # [1, T_ssl, 1024]
+        feat = vq_emb.hidden_states[W2V_BERT_LAYER]  # [1, T_ssl, 1024]
         feat_norm = (feat - self.semantic_mean.to(feat)) / self.semantic_std.to(feat)
         return feat_norm
 
@@ -117,12 +147,32 @@ class Metis8dEncoder:
             wav_path: Path to .wav file (any sampling rate)
             
         Returns:
-            feat_1024d: [1, T_ssl, 1024] normalized SSL features
-            z_8d: [1, T_ssl, 8] 8-D continuous latents
+            Tuple containing:
+            - feat_1024d: [1, T_ssl, 1024] normalized SSL features
+            - z_8d: [1, T_ssl, 8] 8-D continuous latents
+            
+        Raises:
+            FileNotFoundError: If audio file doesn't exist
+            ValueError: If audio file cannot be loaded
         """
-        # librosa.load() automatically resamples to 16kHz if input is different rate
-        # This is the "preprocessing layer" before wav2vec
-        return self.encode_waveform_16k(librosa.load(wav_path, sr=16000, mono=True)[0])
+        if not os.path.exists(wav_path):
+            raise FileNotFoundError(
+                f"Audio file not found: {wav_path}\n"
+                f"Please ensure the file exists and the path is correct."
+            )
+        
+        try:
+            # librosa.load() automatically resamples to 16kHz if input is different rate
+            wav_16k, _ = librosa.load(wav_path, sr=SEMANTIC_SAMPLE_RATE, mono=True)
+            if len(wav_16k) == 0:
+                raise ValueError(f"Audio file is empty: {wav_path}")
+            return self.encode_waveform_16k(wav_16k)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load audio file: {wav_path}\n"
+                f"Error: {str(e)}\n"
+                f"Please ensure the file is a valid audio format (WAV, MP3, etc.)"
+            ) from e
 
     @torch.no_grad()
     def wav2acoustic(self, wav_24k: np.ndarray) -> torch.Tensor:
@@ -154,10 +204,29 @@ class Metis8dEncoder:
             
         Returns:
             acoustic_code: [1, T_ac, 12] acoustic codes (long tensor)
+            
+        Raises:
+            FileNotFoundError: If audio file doesn't exist
+            ValueError: If audio file cannot be loaded
         """
-        # librosa.load() automatically resamples to 24kHz if input is different rate
-        wav_24k = librosa.load(wav_path, sr=24000, mono=True)[0]
-        return self.wav2acoustic(wav_24k)
+        if not os.path.exists(wav_path):
+            raise FileNotFoundError(
+                f"Audio file not found: {wav_path}\n"
+                f"Please ensure the file exists and the path is correct."
+            )
+        
+        try:
+            # librosa.load() automatically resamples to 24kHz if input is different rate
+            wav_24k, _ = librosa.load(wav_path, sr=ACOUSTIC_SAMPLE_RATE, mono=True)
+            if len(wav_24k) == 0:
+                raise ValueError(f"Audio file is empty: {wav_path}")
+            return self.wav2acoustic(wav_24k)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load audio file: {wav_path}\n"
+                f"Error: {str(e)}\n"
+                f"Please ensure the file is a valid audio format (WAV, MP3, etc.)"
+            ) from e
 
     @torch.no_grad()
     def encode_full_from_path(
@@ -216,8 +285,17 @@ class Metis8dDecoder:
 
     # ---------------- S2A setup ----------------
 
-    def _build_s2a_models(self):
-        print("Building S2A models...")
+    def _build_s2a_models(self) -> Tuple[torch.nn.Module, torch.nn.Module]:
+        """
+        Build and load S2A (semantic-to-acoustic) models.
+        
+        Downloads model checkpoints from HuggingFace on first run.
+        This may take 5-10 minutes depending on internet connection.
+        
+        Returns:
+            Tuple of (s2a_model_1layer, s2a_model_full) models
+        """
+        logger.info("Building S2A models...")
         s2a_model_1layer = build_s2a_model(
             self.cfg.model.s2a_model.s2a_1layer, self.device
         )
@@ -225,23 +303,37 @@ class Metis8dDecoder:
             self.cfg.model.s2a_model.s2a_full, self.device
         )
 
-        # download checkpoints
-        print("Downloading S2A model checkpoints (this may take 5-10 minutes)...")
-        s2a_1layer_dir = snapshot_download(
-            repo_id="amphion/MaskGCT",
-            repo_type="model",
-            local_dir="./models/tts/metis/ckpt",
-            allow_patterns=["s2a_model/s2a_model_1layer/model.safetensors"],
-        )
-        print("✓ Downloaded s2a_model_1layer")
+        # Download checkpoints from HuggingFace
+        logger.info("Downloading S2A model checkpoints (this may take 5-10 minutes)...")
+        try:
+            s2a_1layer_dir = snapshot_download(
+                repo_id="amphion/MaskGCT",
+                repo_type="model",
+                local_dir="./models/tts/metis/ckpt",
+                allow_patterns=["s2a_model/s2a_model_1layer/model.safetensors"],
+            )
+            logger.info("✓ Downloaded s2a_model_1layer")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download s2a_model_1layer checkpoint.\n"
+                f"Error: {str(e)}\n"
+                f"Please check your internet connection and try again."
+            ) from e
         
-        s2a_full_dir = snapshot_download(
-            repo_id="amphion/MaskGCT",
-            repo_type="model",
-            local_dir="./models/tts/metis/ckpt",
-            allow_patterns=["s2a_model/s2a_model_full/model.safetensors"],
-        )
-        print("✓ Downloaded s2a_model_full")
+        try:
+            s2a_full_dir = snapshot_download(
+                repo_id="amphion/MaskGCT",
+                repo_type="model",
+                local_dir="./models/tts/metis/ckpt",
+                allow_patterns=["s2a_model/s2a_model_full/model.safetensors"],
+            )
+            logger.info("✓ Downloaded s2a_model_full")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download s2a_model_full checkpoint.\n"
+                f"Error: {str(e)}\n"
+                f"Please check your internet connection and try again."
+            ) from e
         
         s2a_1layer_ckpt = os.path.join(
             s2a_1layer_dir, "s2a_model/s2a_model_1layer/model.safetensors"
@@ -309,30 +401,46 @@ class Metis8dDecoder:
             prompt_acoustic_code = prompt_acoustic_code.to(self.device).long()
             
             # CRITICAL FIX: Ensure prompt is not longer than semantic code
-            # The reverse_diffusion assumes: cond.shape[1] >= prompt_len
-            # In voice conversion, prompt is a style reference (should be short)
-            # Semantic code length determines the target length
+            # The reverse_diffusion calculates: target_len = cond.shape[1] - prompt_len
+            # So if semantic_len=210 and prompt_len=150, we only get 60 tokens of output!
+            # For voice conversion, prompt should be SHORT (1-2 seconds = 50-100 tokens)
+            # to preserve the full output length
             semantic_len = semantic_code.shape[1]
             prompt_len = prompt_acoustic_code.shape[1]
             
-            if prompt_len >= semantic_len:
-                # Truncate prompt to max 2-3 seconds worth (or semantic_len - 1)
-                max_prompt_len = min(MAX_PROMPT_LENGTH, semantic_len - 1)
-                if max_prompt_len <= 0:
-                    # If semantic is too short, use empty prompt
-                    prompt_acoustic_code = torch.zeros(1, 0, 12, device=self.device, dtype=torch.long)
-                    warnings.warn(
-                        f"Semantic code length ({semantic_len}) is too short for prompt ({prompt_len}). "
-                        f"Using empty prompt. Consider using longer source audio or shorter reference audio."
-                    )
-                else:
-                    prompt_acoustic_code = prompt_acoustic_code[:, :max_prompt_len, :]
-                    prompt_duration = max_prompt_len / SEMANTIC_RATE_HZ
-                    warnings.warn(
-                        f"Prompt length ({prompt_len}) >= semantic code length ({semantic_len}). "
-                        f"Truncating prompt to {max_prompt_len} tokens (first ~{prompt_duration:.1f}s). "
-                        f"For best results, use a short reference audio (1-3 seconds) as style prompt."
-                    )
+            # Use a much shorter prompt (1-2 seconds max) to preserve output length
+            # This ensures: target_len = semantic_len - prompt_len is large enough
+            max_prompt_len = min(
+                MAX_PROMPT_LENGTH_TOKENS, 
+                semantic_len // PROMPT_LENGTH_RATIO
+            )  # Max 2 seconds or 1/3 of semantic length
+            
+            if prompt_len > max_prompt_len:
+                prompt_acoustic_code = prompt_acoustic_code[:, :max_prompt_len, :]
+                prompt_duration = max_prompt_len / SEMANTIC_RATE_HZ
+                logger.warning(
+                    f"Prompt length ({prompt_len} tokens) exceeds recommended maximum "
+                    f"({max_prompt_len} tokens, ~{prompt_duration:.1f}s). "
+                    f"Truncating to preserve output length. "
+                    f"For best results, use a short reference audio (1-2 seconds)."
+                )
+                warnings.warn(
+                    f"Prompt truncated from {prompt_len} to {max_prompt_len} tokens "
+                    f"(~{prompt_duration:.1f}s) to preserve output length. "
+                    f"Recommended: use 1-2 second reference audio.",
+                    UserWarning,
+                    stacklevel=2
+                )
+            
+            # Final check: ensure we have enough room for output
+            final_prompt_len = prompt_acoustic_code.shape[1]
+            if final_prompt_len >= semantic_len:
+                # If prompt is still too long, use empty prompt
+                prompt_acoustic_code = torch.zeros(1, 0, 12, device=self.device, dtype=torch.long)
+                warnings.warn(
+                    f"Semantic code length ({semantic_len}) is too short for prompt ({final_prompt_len}). "
+                    f"Using empty prompt. Consider using longer source audio."
+                )
 
         # Stage 1: Coarse prediction (1 quantizer)
         # cond: semantic codes embedded → provides content

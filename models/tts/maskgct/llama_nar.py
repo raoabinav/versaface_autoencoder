@@ -95,14 +95,69 @@ class LlamaNARDecoderLayer(LlamaDecoderLayer):
         )
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-        )
+        # Handle transformers version compatibility - get position embeddings from rotary emb
+        # Newer transformers (4.57+) requires position_embeddings as (cos, sin) tuple
+        position_embeddings = None
+        
+        # Try to get rotary_emb from self_attn - it might be in different places
+        rotary_emb = None
+        if hasattr(self.self_attn, 'rotary_emb'):
+            rotary_emb = self.self_attn.rotary_emb
+        elif hasattr(self.self_attn, 'q_proj') and hasattr(self.self_attn.q_proj, 'rotary_emb'):
+            rotary_emb = self.self_attn.q_proj.rotary_emb
+        
+        if rotary_emb is not None and position_ids is not None:
+            try:
+                # rotary_emb.forward(x, position_ids) returns (cos, sin) tuple
+                cos, sin = rotary_emb(hidden_states, position_ids)
+                position_embeddings = (cos, sin)
+            except Exception:
+                pass
+        
+        # Try calling with position_embeddings if available
+        try:
+            if position_embeddings is not None:
+                hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    position_embeddings=position_embeddings,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                )
+            else:
+                hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                )
+        except TypeError as e:
+            if "position_embeddings" in str(e):
+                # Must provide position_embeddings - try to get from rotary_emb
+                if rotary_emb is not None and position_ids is not None:
+                    try:
+                        cos, sin = rotary_emb(hidden_states, position_ids)
+                        position_embeddings = (cos, sin)
+                        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                            hidden_states=hidden_states,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                            position_embeddings=position_embeddings,
+                            past_key_value=past_key_value,
+                            output_attentions=output_attentions,
+                            use_cache=use_cache,
+                        )
+                    except Exception as e2:
+                        raise RuntimeError(f"Failed to get position_embeddings from rotary_emb: {e2}. Original error: {e}") from e
+                else:
+                    # Last resort: try to downgrade transformers or patch the model
+                    raise RuntimeError(f"position_embeddings required but rotary_emb not found. This is a transformers 4.57+ compatibility issue. Original error: {e}") from e
+            else:
+                raise
         hidden_states = residual + hidden_states
 
         # Fully Connected
