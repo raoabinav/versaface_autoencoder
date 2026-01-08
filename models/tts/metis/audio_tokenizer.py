@@ -141,9 +141,7 @@ class AudioTokenizer:
                 f"Error: {str(e)}\n"
                 f"Please check your internet connection and try again."
             ) from e
-        codec_decoder_ckpt = os.path.join(
-            codec_decoder_ckpt, "acoustic_codec/model_1.safetensors"
-        )
+        # Note: codec_decoder_ckpt is already the full path, no need to join again
 
         # load acoustic codec
         # Handle shared tensor issues by loading manually
