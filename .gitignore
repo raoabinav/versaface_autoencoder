@@ -60,6 +60,8 @@ pretrained/bigvgan/args.json
 *.wav
 !egs/tts/VALLE/prompt_examples/*.wav
 !models/tts/metis/test audios/*.wav
+!models/tts/metis/test_voice_conversion/*.wav
+!models/tts/metis/test_voice_conversion/*.zip
 
 # Runtime data dirs
 processed_data
