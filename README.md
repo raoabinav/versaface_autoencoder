@@ -290,46 +290,67 @@ $ python example_voice_conversion.py \
 
 **Result**: Source audio (4.2s) + Reference style (1.5s) → Output (4.2s, full length preserved)
 
-### Batch Extraction Test
+### Embedding Extraction Demo
+
+A working demo is included in `test_audio_extraction/` with 3 sample audio files.
+
+**Run the demo:**
+
+```bash
+python extract_audio_embeddings.py \
+    --audio-dir ./test_audio_extraction/audios \
+    --embedding-dir ./test_audio_extraction/embeddings \
+    --json-dir ./test_audio_extraction
+```
+
+**Output:**
 
 ```
-$ python extract_audio_embeddings.py --max-files 5 --part part_003 \
-    --embedding-dir test_output/embeddings --json-dir test_output/jsons
-
-Found 2129 audio files in /data/common/versaface/audios/part_003
-Limited to 5 files for testing
-Processing 5 audio files
-
-Extracting embeddings: 100%|██████████| 5/5 [00:02<00:00, 2.16it/s]
+======================================================================
+EXTRACTING EMBEDDINGS
+======================================================================
+Processing 3 audio files
+Extracting embeddings: 100%|██████████| 3/3 [00:03<00:00,  1.30s/it]
 
 ✅ EXTRACTION COMPLETE
-Total successful: 5
+Total successful: 3
+Embeddings saved to: ./test_audio_extraction/embeddings
 ```
 
-**Output structure:**
+**Demo folder structure:**
+
 ```
-test_output/
-├── embeddings/
-│   └── part_003/
-│       └── 00/
-│           ├── 05/00055b60d58d197ad1de21f37092fccd.npy  # Shape: [153, 8]
-│           ├── 21/0021930be5d510a7d8b6f56bc59d6e27.npy  # Shape: [121, 8]
-│           ├── 23/00235ac40bb832a6a7bb6e2f57756b2b.npy  # Shape: [172, 8]
-│           ├── 29/00291bf5eaf786352490107fe70b620a.npy  # Shape: [146, 8]
-│           └── 36/003677bb6ebc6d9a578eac32a204d5ff.npy  # Shape: [354, 8]
-└── jsons/
-    └── success_total_audio.json
+test_audio_extraction/
+├── audios/                           # Input audio files
+│   ├── sample_01/audio_001.wav
+│   ├── sample_02/audio_002.wav
+│   └── sample_03/audio_003.wav
+├── embeddings/                       # Output NPY files (same structure)
+│   ├── sample_01/audio_001.npy       # Shape: [255, 8], dtype: float32
+│   ├── sample_02/audio_002.npy       # Shape: [214, 8], dtype: float32
+│   └── sample_03/audio_003.npy       # Shape: [134, 8], dtype: float32
+└── success_total_audio.json          # List of processed audio paths
 ```
 
 **Success JSON content:**
+
 ```json
 [
-    "/data/common/versaface/audios/part_003/00/05/00055b60d58d197ad1de21f37092fccd.wav",
-    "/data/common/versaface/audios/part_003/00/21/0021930be5d510a7d8b6f56bc59d6e27.wav",
-    "/data/common/versaface/audios/part_003/00/23/00235ac40bb832a6a7bb6e2f57756b2b.wav",
-    "/data/common/versaface/audios/part_003/00/29/00291bf5eaf786352490107fe70b620a.wav",
-    "/data/common/versaface/audios/part_003/00/36/003677bb6ebc6d9a578eac32a204d5ff.wav"
+    "./test_audio_extraction/audios/sample_01/audio_001.wav",
+    "./test_audio_extraction/audios/sample_02/audio_002.wav",
+    "./test_audio_extraction/audios/sample_03/audio_003.wav"
 ]
+```
+
+### Production Usage
+
+For the full versaface dataset:
+
+```bash
+python extract_audio_embeddings.py \
+    --audio-dir /data/common/versaface/audios \
+    --embedding-dir /data/common/versaface/audio_embeddings \
+    --json-dir /data/common/versaface/jsons
 ```
 
 ---
@@ -344,7 +365,8 @@ versaface_autoencoder/
 │   │   │   ├── audio_tokenizer.py       # AudioTokenizer class
 │   │   │   ├── semantic_8d_wrappers.py  # Metis8dEncoder, Metis8dDecoder
 │   │   │   ├── config/base.json         # Model configuration
-│   │   │   └── ckpt/                    # Downloaded checkpoints
+│   │   │   ├── ckpt/                    # Downloaded checkpoints
+│   │   │   └── test_voice_conversion/   # Voice conversion test files
 │   │   └── maskgct/
 │   │       ├── maskgct_s2a.py           # S2A diffusion model
 │   │       ├── maskgct_utils.py         # Model builders
@@ -358,8 +380,11 @@ versaface_autoencoder/
 │           ├── vocos.py                 # Vocos decoder
 │           └── quantize/                # VQ modules
 ├── utils/
-│   ├── util.py                          # load_config, utilities
-│   └── hparam.py                        # HParams class
+│   └── util.py                          # load_config, JsonHParams
+├── test_audio_extraction/               # Demo for embedding extraction
+│   ├── audios/                          # Sample audio files
+│   ├── embeddings/                      # Output NPY embeddings
+│   └── success_total_audio.json         # Processed file list
 ├── example_voice_conversion.py          # Voice conversion CLI
 ├── extract_audio_embeddings.py          # Batch extraction script
 ├── notebook.ipynb                       # Interactive examples
