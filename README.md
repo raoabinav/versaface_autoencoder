@@ -1,148 +1,338 @@
 # VersaFace Autoencoder
 
-A neural audio autoencoder based on Metis TTS that extracts 8-dimensional continuous semantic latents from audio and enables voice conversion. This system can convert source audio content to match a reference voice's prosody and style.
+A neural audio autoencoder that extracts **8-dimensional continuous semantic latents** from audio. Built on Metis TTS, this system enables voice conversion and batch embedding extraction for large-scale audio datasets.
 
-## Features
+## Table of Contents
 
-- **8-D Semantic Encoding**: Extract 8-dimensional continuous latents from audio waveforms
-- **Voice Conversion**: Convert source voice content using reference voice style/prosody
-- **High-Quality Audio**: 24kHz output with natural voice characteristics
-- **GPU Accelerated**: Supports CUDA for faster processing
+- [Overview](#overview)
+- [Installation](#installation)
+- [API Reference](#api-reference)
+  - [Metis8dEncoder](#metis8dencoder)
+  - [Metis8dDecoder](#metis8ddecoder)
+- [Voice Conversion](#voice-conversion)
+- [Batch Embedding Extraction](#batch-embedding-extraction)
+- [Test Results](#test-results)
+- [Project Structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
 
-## Architecture Overview
+---
 
-### Encoding Pipeline (Audio → 8-D Latents)
+## Overview
 
-1. **Input**: Raw audio waveform (16kHz)
-2. **Feature Extraction**: w2v-bert-2.0 (SeamlessM4T) extracts 1024-dimensional features from layer 17
-3. **Normalization**: Features are normalized (mean subtraction, std division)
-4. **Semantic Codec (RepCodec)**:
-   - VocosBackbone encoder processes normalized features
-   - Factorized Vector Quantization projects 1024-D → 8-D latents, then quantizes
-5. **Output**: 8-D continuous latents [B, T, 8] and semantic codes [B, T] (discrete token indices)
+### Architecture
 
-### Voice Conversion Pipeline
+```
+Audio (16kHz) → w2v-bert-2.0 → 1024-D features → RepCodec → 8-D latents
+                                                              ↓
+                                               [T, 8] continuous vectors @ 50Hz
+```
 
-1. **Source Audio** → 8-D semantic latents (content: "what to say")
-2. **Reference Audio** → Acoustic codes (style: "how to say it")
-3. **Decoding**: 8-D latents + Acoustic prompt → Converted audio (source content with reference style)
+### Key Specifications
+
+| Parameter | Value |
+|-----------|-------|
+| Input sample rate | 16 kHz (semantic), 24 kHz (acoustic) |
+| Output sample rate | 24 kHz |
+| Latent dimensions | 8 |
+| Latent frame rate | 50 Hz (20ms per frame) |
+| Semantic codebook size | 8192 |
+| Acoustic quantizers | 12 |
+
+---
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.8+
-- CUDA-capable GPU (recommended) or CPU
+- CUDA-capable GPU (recommended)
 - 8GB+ RAM
-- 5GB+ disk space for model checkpoints
+- 5GB disk space for model checkpoints
 
-### Step 1: Clone the Repository
+### Setup
 
 ```bash
+# Clone repository
 git clone <repository-url>
 cd versaface_autoencoder
-```
 
-### Step 2: Create Virtual Environment
-
-```bash
-# Using conda (recommended)
+# Create conda environment
 conda create -n versaface python=3.10
 conda activate versaface
 
-# Or using venv
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-### Step 3: Install Dependencies
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-**Note**: The first time you run the code, model checkpoints will be automatically downloaded from HuggingFace (approximately 5GB). This may take 5-10 minutes depending on your internet connection.
+Model checkpoints are automatically downloaded from HuggingFace on first run (~5GB).
 
-## Quick Start
+---
 
-### Basic Usage: Voice Conversion
+## API Reference
+
+### Metis8dEncoder
+
+Extracts 8-D continuous semantic latents from audio.
+
+#### Initialization
 
 ```python
-import os
+from utils.util import load_config
+from models.tts.metis.audio_tokenizer import AudioTokenizer
+from models.tts.metis.semantic_8d_wrappers import Metis8dEncoder
+
+device = "cuda:0"
+cfg = load_config("models/tts/metis/config/base.json")
+audio_tokenizer = AudioTokenizer(cfg, device)
+encoder = Metis8dEncoder(audio_tokenizer)
+```
+
+#### Methods
+
+##### `encode_from_path(wav_path: str) -> Tuple[Tensor, Tensor]`
+
+Extract 8-D latents from an audio file.
+
+```python
+feat_1024d, z_8d = encoder.encode_from_path("audio.wav")
+# feat_1024d: [1, T, 1024] - SSL features
+# z_8d: [1, T, 8] - 8-D continuous latents
+```
+
+**Parameters:**
+- `wav_path`: Path to audio file (any sample rate, auto-resampled to 16kHz)
+
+**Returns:**
+- `feat_1024d`: `Tensor[1, T, 1024]` - Normalized SSL features
+- `z_8d`: `Tensor[1, T, 8]` - 8-D continuous latents
+
+##### `encode_acoustic_from_path(wav_path: str) -> Tensor`
+
+Extract acoustic codes for voice conversion style transfer.
+
+```python
+acoustic_codes = encoder.encode_acoustic_from_path("reference.wav")
+# acoustic_codes: [1, T, 12] - 12-layer acoustic codes
+```
+
+**Parameters:**
+- `wav_path`: Path to audio file (auto-resampled to 24kHz)
+
+**Returns:**
+- `acoustic_codes`: `Tensor[1, T, 12]` - Acoustic codes (long)
+
+---
+
+### Metis8dDecoder
+
+Decodes 8-D latents back to audio waveform.
+
+#### Initialization
+
+```python
+from models.tts.metis.semantic_8d_wrappers import Metis8dDecoder
+
+decoder = Metis8dDecoder(cfg, audio_tokenizer)
+```
+
+#### Methods
+
+##### `decode_from_z(z_8d: Tensor, prompt_acoustic_code: Tensor = None) -> np.ndarray`
+
+Decode 8-D latents to waveform, optionally with voice conversion.
+
+```python
+# Without voice conversion (reconstruction)
+waveform = decoder.decode_from_z(z_8d)
+
+# With voice conversion (source content + reference style)
+waveform = decoder.decode_from_z(z_8d, prompt_acoustic_code=acoustic_codes)
+```
+
+**Parameters:**
+- `z_8d`: `Tensor[1, T, 8]` - 8-D continuous latents (content)
+- `prompt_acoustic_code`: `Tensor[1, T_prompt, 12]` - Acoustic codes for style (optional)
+
+**Returns:**
+- `waveform`: `np.ndarray[T_samples]` - Audio waveform at 24kHz
+
+---
+
+## Voice Conversion
+
+Voice conversion transfers the **content** from a source audio to the **style/voice** of a reference audio.
+
+### Command Line
+
+```bash
+python example_voice_conversion.py \
+    --source path/to/source.wav \
+    --reference path/to/reference.wav \
+    --output output.wav
+```
+
+### Python API
+
+```python
 import torch
+import soundfile as sf
 from utils.util import load_config
 from models.tts.metis.audio_tokenizer import AudioTokenizer
 from models.tts.metis.semantic_8d_wrappers import Metis8dEncoder, Metis8dDecoder
-import soundfile as sf
 
-# Setup
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-cfg_path = "models/tts/metis/config/base.json"
-cfg = load_config(cfg_path)
-
-# Initialize models (this downloads checkpoints on first run)
-print("Loading models...")
+# Initialize
+device = "cuda:0"
+cfg = load_config("models/tts/metis/config/base.json")
 audio_tokenizer = AudioTokenizer(cfg, device)
 encoder = Metis8dEncoder(audio_tokenizer)
 decoder = Metis8dDecoder(cfg, audio_tokenizer)
 
-# Voice conversion
-source_audio = "path/to/source.wav"  # Content (what to say)
-reference_audio = "path/to/reference.wav"  # Style (how to say it, 1-2 seconds recommended)
+# Extract content from source
+_, z_8d = encoder.encode_from_path("source.wav")
 
-# Encode source to 8-D latents
-_, z_8d = encoder.encode_from_path(source_audio)
-
-# Extract acoustic codes from reference (for style)
-prompt_acoustic = encoder.encode_acoustic_from_path(reference_audio)
-
-# Decode with voice conversion
-output_wav = decoder.decode_from_z(z_8d, prompt_acoustic_code=prompt_acoustic)
-
-# Save result
-sf.write("output.wav", output_wav, 24000)
-print("Voice conversion complete!")
-```
-
-### Using the Jupyter Notebook
-
-The included `notebook.ipynb` provides a complete example with step-by-step execution:
-
-1. Open the notebook: `jupyter notebook notebook.ipynb`
-2. Run cells sequentially (Cells 0-1 initialize models, Cell 5 demonstrates voice conversion)
-3. Place your audio files in `models/tts/metis/test audios/`:
-   - `source-vc.wav` - Source audio (content)
-   - `prompt-vc.wav` - Reference audio (style, 1-2 seconds recommended)
-
-## Usage Examples
-
-### Extract 8-D Latents from Audio
-
-```python
-encoder = Metis8dEncoder(audio_tokenizer)
-
-# Extract 8-D continuous latents
-feat_1024d, z_8d = encoder.encode_from_path("audio.wav")
-print(f"8-D latents shape: {z_8d.shape}")  # [1, T, 8]
-```
-
-### Voice Conversion
-
-```python
-# Source provides content, reference provides style
-z_8d_source = encoder.encode_from_path("source.wav")[1]
+# Extract style from reference
 prompt_acoustic = encoder.encode_acoustic_from_path("reference.wav")
 
-# Convert voice
-output = decoder.decode_from_z(z_8d_source, prompt_acoustic_code=prompt_acoustic)
-sf.write("converted.wav", output, 24000)
+# Voice conversion
+output = decoder.decode_from_z(z_8d, prompt_acoustic_code=prompt_acoustic)
+
+# Save
+sf.write("output.wav", output, 24000)
 ```
 
-### Important Notes
+### Notes
 
-- **Reference Audio Length**: For best results, use a short reference audio (1-2 seconds). Longer references will reduce the output length because the model calculates: `output_length = semantic_length - prompt_length`
-- **Audio Format**: Input audio can be any sample rate; it will be automatically resampled to 16kHz for encoding and 24kHz for decoding
-- **GPU Memory**: Model loading requires ~4GB GPU memory. Use CPU if GPU is unavailable (slower)
+- Reference audio should be **1-2 seconds** for best results
+- Output length matches source audio length
+- Source provides "what to say", reference provides "how to say it"
+
+---
+
+## Batch Embedding Extraction
+
+Extract 8-D embeddings from large audio datasets, saving as `.npy` files with matching folder structure.
+
+### Output Format
+
+```
+Input:  /data/versaface/audios/part_003/00/05/00055b60d58d197ad1de21f37092fccd.wav
+Output: /data/versaface/audio_embeddings/part_003/00/05/00055b60d58d197ad1de21f37092fccd.npy
+```
+
+Each `.npy` file contains a `float32` array of shape `[T, 8]` where `T` = number of frames at 50Hz.
+
+### Usage
+
+```bash
+# Full extraction
+python extract_audio_embeddings.py \
+    --audio-dir /data/versaface/audios \
+    --embedding-dir /data/versaface/audio_embeddings \
+    --json-dir /data/versaface/jsons
+
+# Process specific part
+python extract_audio_embeddings.py --part part_003
+
+# Test with limited files
+python extract_audio_embeddings.py --max-files 100
+
+# Resume interrupted extraction (auto-skips existing files)
+python extract_audio_embeddings.py
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--audio-dir` | `/data/common/versaface/audios` | Input audio directory |
+| `--embedding-dir` | `/data/common/versaface/audio_embeddings` | Output NPY directory |
+| `--json-dir` | `/data/common/versaface/jsons` | Success JSON directory |
+| `--part` | None | Process only specific part (e.g., `part_003`) |
+| `--max-files` | None | Limit files for testing |
+| `--batch-size` | 100 | Save progress every N files |
+| `--device` | `cuda:0` | Device for inference |
+
+### Output Files
+
+1. **NPY Embeddings**: `{embedding-dir}/part_XXX/XX/XX/hash.npy`
+   - Shape: `[T, 8]` where T ≈ duration_seconds × 50
+   - Dtype: `float32`
+
+2. **Success JSON**: `{json-dir}/success_total_audio.json`
+   - List of successfully processed audio paths
+   - Format matches video JSON structure
+
+---
+
+## Test Results
+
+### Voice Conversion Test
+
+```
+$ python example_voice_conversion.py \
+    --source models/tts/metis/test_voice_conversion/test_voice_conversion_source.wav \
+    --reference models/tts/metis/test_voice_conversion/test_voice_conversion_reference.wav \
+    --output models/tts/metis/test_voice_conversion/output_fixed.wav
+
+[STEP 1] Encoding source audio to 8-D semantic latents...
+✓ 8-D latents shape: torch.Size([1, 210, 8])
+
+[STEP 2] Extracting acoustic codes from reference audio...
+✓ Acoustic codes shape: torch.Size([1, 75, 12])
+  Reference duration: ~1.50 seconds
+
+[STEP 3] Converting voice...
+✓ Generated waveform: 100800 samples
+  Duration: 4.20 seconds
+
+✅ VOICE CONVERSION COMPLETE
+```
+
+**Result**: Source audio (4.2s) + Reference style (1.5s) → Output (4.2s, full length preserved)
+
+### Batch Extraction Test
+
+```
+$ python extract_audio_embeddings.py --max-files 5 --part part_003 \
+    --embedding-dir test_output/embeddings --json-dir test_output/jsons
+
+Found 2129 audio files in /data/common/versaface/audios/part_003
+Limited to 5 files for testing
+Processing 5 audio files
+
+Extracting embeddings: 100%|██████████| 5/5 [00:02<00:00, 2.16it/s]
+
+✅ EXTRACTION COMPLETE
+Total successful: 5
+```
+
+**Output structure:**
+```
+test_output/
+├── embeddings/
+│   └── part_003/
+│       └── 00/
+│           ├── 05/00055b60d58d197ad1de21f37092fccd.npy  # Shape: [153, 8]
+│           ├── 21/0021930be5d510a7d8b6f56bc59d6e27.npy  # Shape: [121, 8]
+│           ├── 23/00235ac40bb832a6a7bb6e2f57756b2b.npy  # Shape: [172, 8]
+│           ├── 29/00291bf5eaf786352490107fe70b620a.npy  # Shape: [146, 8]
+│           └── 36/003677bb6ebc6d9a578eac32a204d5ff.npy  # Shape: [354, 8]
+└── jsons/
+    └── success_total_audio.json
+```
+
+**Success JSON content:**
+```json
+[
+    "/data/common/versaface/audios/part_003/00/05/00055b60d58d197ad1de21f37092fccd.wav",
+    "/data/common/versaface/audios/part_003/00/21/0021930be5d510a7d8b6f56bc59d6e27.wav",
+    "/data/common/versaface/audios/part_003/00/23/00235ac40bb832a6a7bb6e2f57756b2b.wav",
+    "/data/common/versaface/audios/part_003/00/29/00291bf5eaf786352490107fe70b620a.wav",
+    "/data/common/versaface/audios/part_003/00/36/003677bb6ebc6d9a578eac32a204d5ff.wav"
+]
+```
+
+---
 
 ## Project Structure
 
@@ -151,49 +341,70 @@ versaface_autoencoder/
 ├── models/
 │   ├── tts/
 │   │   ├── metis/
-│   │   │   ├── audio_tokenizer.py      # Audio tokenization
-│   │   │   ├── semantic_8d_wrappers.py # Encoder/Decoder wrappers
-│   │   │   ├── config/                 # Model configuration
-│   │   │   ├── test audios/            # Test audio files
-│   │   │   └── result audios/          # Output directory
-│   │   └── maskgct/                    # S2A (semantic-to-acoustic) models
-│   └── codec/                          # Audio codecs
-├── utils/                               # Utility functions
+│   │   │   ├── audio_tokenizer.py       # AudioTokenizer class
+│   │   │   ├── semantic_8d_wrappers.py  # Metis8dEncoder, Metis8dDecoder
+│   │   │   ├── config/base.json         # Model configuration
+│   │   │   └── ckpt/                    # Downloaded checkpoints
+│   │   └── maskgct/
+│   │       ├── maskgct_s2a.py           # S2A diffusion model
+│   │       ├── maskgct_utils.py         # Model builders
+│   │       └── llama_nar.py             # DiffLlama architecture
+│   └── codec/
+│       ├── kmeans/
+│       │   ├── repcodec_model.py        # RepCodec semantic codec
+│       │   └── vocos.py                 # VocosBackbone
+│       └── amphion_codec/
+│           ├── codec.py                 # Acoustic encoder/decoder
+│           ├── vocos.py                 # Vocos decoder
+│           └── quantize/                # VQ modules
+├── utils/
+│   ├── util.py                          # load_config, utilities
+│   └── hparam.py                        # HParams class
+├── example_voice_conversion.py          # Voice conversion CLI
+├── extract_audio_embeddings.py          # Batch extraction script
 ├── notebook.ipynb                       # Interactive examples
-├── requirements.txt                     # Python dependencies
+├── requirements.txt                     # Dependencies
 └── README.md                            # This file
 ```
 
-## Components
-
-- **w2v-bert-2.0**: Self-supervised learning model for extracting semantic features from audio
-- **RepCodec**: Semantic codec that compresses 1024-D features to 8-D continuous latents
-- **Factorized Vector Quantization**: Quantization module for discrete code generation
-- **S2A Models**: Semantic-to-acoustic conversion models (2-stage reverse diffusion)
+---
 
 ## Troubleshooting
 
-### Transformers Version Compatibility
+### Transformers Version Error
 
-If you encounter errors like `LlamaAttention.forward() missing 1 required positional argument: 'position_embeddings'`, ensure you're using transformers 4.40.0:
+```
+LlamaAttention.forward() missing 1 required positional argument: 'position_embeddings'
+```
 
+**Fix:** Install exact version:
 ```bash
 pip install transformers==4.40.0
 ```
 
-### Model Download Issues
+### Permission Denied
 
-If model downloads fail:
-- Check your internet connection
-- Ensure you have sufficient disk space (~5GB)
-- Models are downloaded to `models/tts/metis/ckpt/` on first run
+```
+PermissionError: [Errno 13] Permission denied: '/data/common/versaface/audio_embeddings'
+```
+
+**Fix:** Use a writable output directory:
+```bash
+python extract_audio_embeddings.py --embedding-dir /data/abi/embeddings --json-dir /data/abi/jsons
+```
 
 ### GPU Out of Memory
 
-If you run out of GPU memory:
-- Use CPU instead: `device = "cpu"`
-- Process shorter audio segments
-- Clear cache between operations: `torch.cuda.empty_cache()`
+**Fix:**
+```bash
+# Use CPU
+python extract_audio_embeddings.py --device cpu
+
+# Or clear cache in code
+torch.cuda.empty_cache()
+```
+
+---
 
 ## License
 
@@ -202,7 +413,3 @@ MIT License
 ## Citation
 
 If you use this code, please cite the original Metis TTS and Amphion projects.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.

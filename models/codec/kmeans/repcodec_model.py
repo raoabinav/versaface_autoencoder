@@ -3,7 +3,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from concurrent.futures import ALL_COMPLETED
 import numpy as np
 import torch
 import torch.nn as nn
@@ -203,11 +202,6 @@ class RepCodec(nn.Module):
             all_codebook_losses,
             _,
         ) = self.quantizer(x)
-
-        # debug whats goign on
-        print("quantized_out:", quantized_out.shape)
-        print("all_indices:", all_indices.shape)
-
 
         if all_indices.shape[0] == 1:
             return all_indices.squeeze(0), quantized_out.transpose(1, 2)

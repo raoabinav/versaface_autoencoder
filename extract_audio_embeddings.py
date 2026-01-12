@@ -1,25 +1,44 @@
 #!/usr/bin/env python3
 """
-Extract 8-D semantic audio embeddings from versaface audio files.
+Extract 8-D semantic audio embeddings from audio files.
 
-This script processes all audio files in /data/common/versaface/audios/
-and extracts 8-D semantic embeddings using the Metis encoder.
-The embeddings are saved as JSON files in /data/common/versaface/jsons/
+This script processes audio files and:
+1. Saves embeddings as .npy files (mirroring the folder structure: .wav → .npy)
+2. Tracks successfully processed paths in a JSON list for resumability
+
+Each .npy file contains a float32 array of shape [T, 8] where:
+- T = number of time frames (approximately 50 per second of audio)
+- 8 = dimension of the semantic latent space
+
+Usage:
+    # Process all files
+    python extract_audio_embeddings.py
+
+    # Process specific part
+    python extract_audio_embeddings.py --part part_003
+
+    # Test with limited files
+    python extract_audio_embeddings.py --max-files 100
+
+    # Custom directories
+    python extract_audio_embeddings.py \\
+        --audio-dir /path/to/audios \\
+        --embedding-dir /path/to/output/embeddings \\
+        --json-dir /path/to/output/jsons
 """
 
 import os
+import sys
 import json
 import argparse
 import logging
-import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
-import torch
+from typing import List, Set
 import numpy as np
+import torch
 from tqdm import tqdm
 
 # Add project root to path
-import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.util import load_config
@@ -35,214 +54,172 @@ logger = logging.getLogger(__name__)
 
 # Constants
 AUDIO_BASE_DIR = "/data/common/versaface/audios"
+EMBEDDING_BASE_DIR = "/data/common/versaface/audio_embeddings"
 JSON_OUTPUT_DIR = "/data/common/versaface/jsons"
-SEMANTIC_EMBEDDINGS_JSON = "semantic_audio_embeddings.json"
+SUCCESS_JSON = "success_total_audio.json"
 
 
-def check_gpu_utilization(device_id: int = 0) -> Optional[Dict[str, str]]:
-    """
-    Check GPU utilization using nvidia-smi.
-    
-    Args:
-        device_id: GPU device ID (default: 0)
-        
-    Returns:
-        Dictionary with GPU stats, or None if nvidia-smi fails
-    """
-    try:
-        # Run nvidia-smi query
-        result = subprocess.run(
-            [
-                'nvidia-smi',
-                f'--id={device_id}',
-                '--query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu',
-                '--format=csv,noheader,nounits'
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode == 0:
-            # Parse output: index,name,gpu_util,mem_util,mem_used,mem_total,temp
-            parts = result.stdout.strip().split(', ')
-            if len(parts) >= 7:
-                return {
-                    'index': parts[0],
-                    'name': parts[1],
-                    'gpu_util': parts[2] + '%',
-                    'mem_util': parts[3] + '%',
-                    'mem_used': parts[4] + ' MB',
-                    'mem_total': parts[5] + ' MB',
-                    'temp': parts[6] + '°C'
-                }
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
-        logger.debug(f"nvidia-smi check failed: {e}")
-    
-    return None
-
-
-def log_gpu_status(device_id: int = 0, context: str = ""):
-    """
-    Log current GPU utilization status.
-    
-    Args:
-        device_id: GPU device ID
-        context: Context string to include in log message
-    """
-    gpu_stats = check_gpu_utilization(device_id)
-    if gpu_stats:
-        context_str = f" [{context}]" if context else ""
-        logger.info(
-            f"GPU Status{context_str}: "
-            f"Util={gpu_stats['gpu_util']}, "
-            f"Mem={gpu_stats['mem_util']} ({gpu_stats['mem_used']}/{gpu_stats['mem_total']}), "
-            f"Temp={gpu_stats['temp']}"
-        )
-    else:
-        logger.debug("Could not retrieve GPU stats (nvidia-smi may not be available)")
-
-
-def find_all_audio_files(audio_dir: str) -> List[str]:
+def find_all_audio_files(audio_dir: str, part: str = None) -> List[str]:
     """
     Find all .wav files in the audio directory.
     
     Args:
         audio_dir: Base directory containing audio files
+        part: Optional part filter (e.g., 'part_003')
         
     Returns:
         List of absolute paths to audio files
     """
     audio_files = []
-    audio_path = Path(audio_dir)
+    search_dir = Path(audio_dir)
     
-    if not audio_path.exists():
-        logger.error(f"Audio directory does not exist: {audio_dir}")
+    if part:
+        search_dir = search_dir / part
+        if not search_dir.exists():
+            logger.error(f"Part directory does not exist: {search_dir}")
+            return audio_files
+    
+    if not search_dir.exists():
+        logger.error(f"Audio directory does not exist: {search_dir}")
         return audio_files
     
     # Find all .wav files recursively
-    for wav_file in audio_path.rglob("*.wav"):
+    for wav_file in search_dir.rglob("*.wav"):
         audio_files.append(str(wav_file.absolute()))
     
-    logger.info(f"Found {len(audio_files)} audio files in {audio_dir}")
+    logger.info(f"Found {len(audio_files)} audio files in {search_dir}")
     return sorted(audio_files)
 
 
-def extract_embeddings_iterative(
+def get_embedding_path(audio_path: str, audio_base_dir: str, embedding_base_dir: str) -> str:
+    """
+    Convert audio path to embedding path.
+    
+    /data/common/versaface/audios/part_XXX/XX/XX/hash.wav
+    → /data/common/versaface/audio_embeddings/part_XXX/XX/XX/hash.npy
+    """
+    # Get relative path from audio base dir
+    rel_path = os.path.relpath(audio_path, audio_base_dir)
+    # Change extension to .npy
+    rel_path_npy = os.path.splitext(rel_path)[0] + ".npy"
+    # Join with embedding base dir
+    return os.path.join(embedding_base_dir, rel_path_npy)
+
+
+def load_existing_success(json_path: str) -> Set[str]:
+    """Load existing successful paths from JSON."""
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r') as f:
+                return set(json.load(f))
+        except Exception as e:
+            logger.warning(f"Could not load existing success JSON: {e}")
+    return set()
+
+
+def save_success_json(success_paths: List[str], json_path: str):
+    """Save successful paths to JSON."""
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
+    with open(json_path, 'w') as f:
+        json.dump(sorted(success_paths), f, indent=4)
+    logger.info(f"Saved {len(success_paths)} successful paths to {json_path}")
+
+
+def process_audio_files(
     encoder: Metis8dEncoder,
     audio_files: List[str],
+    existing_success: Set[str],
+    audio_base_dir: str,
+    embedding_base_dir: str,
+    json_output_dir: str,
     batch_size: int = 100,
     device: str = "cuda"
-) -> Dict[str, List[float]]:
+) -> List[str]:
     """
-    Extract 8-D semantic embeddings from audio files iteratively in batches.
+    Process audio files and save embeddings as NPY files.
     
     Args:
         encoder: Metis8dEncoder instance
         audio_files: List of audio file paths
-        batch_size: Number of files to process before saving intermediate results
-        device: Device to run inference on (should be GPU)
+        existing_success: Set of already processed paths
+        audio_base_dir: Base directory for audio files
+        embedding_base_dir: Base directory for embedding files
+        json_output_dir: Directory for JSON output
+        batch_size: Files to process before saving progress
+        device: Device for inference
         
     Returns:
-        Dictionary mapping audio file paths to 8-D embedding arrays
+        List of successfully processed audio paths
     """
-    embeddings_dict = {}
+    success_paths = list(existing_success)
     failed_files = []
+    skipped = 0
     
-    # Ensure GPU is being used
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but not available!")
+    # Filter out already processed files
+    files_to_process = []
+    for audio_path in audio_files:
+        if audio_path in existing_success:
+            skipped += 1
+            continue
+        # Also check if NPY file exists
+        npy_path = get_embedding_path(audio_path, audio_base_dir, embedding_base_dir)
+        if os.path.exists(npy_path):
+            success_paths.append(audio_path)
+            skipped += 1
+            continue
+        files_to_process.append(audio_path)
     
-    if device.startswith("cuda"):
-        device_id = int(device.split(":")[1]) if ":" in device else 0
-        logger.info(f"Using GPU: {torch.cuda.get_device_name(device_id)}")
-        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(device_id).total_memory / 1e9:.2f} GB")
+    if skipped > 0:
+        logger.info(f"Skipping {skipped} already processed files")
     
-    total_files = len(audio_files)
-    num_batches = (total_files + batch_size - 1) // batch_size
+    if not files_to_process:
+        logger.info("No new files to process!")
+        return success_paths
     
-    logger.info(f"Processing {total_files} audio files in {num_batches} batches (batch_size={batch_size})")
-    logger.info(f"Device: {device}")
+    logger.info(f"Processing {len(files_to_process)} audio files")
     
-    for batch_idx in range(num_batches):
-        start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, total_files)
-        batch_files = audio_files[start_idx:end_idx]
-        
-        logger.info(f"\n--- Batch {batch_idx + 1}/{num_batches} (files {start_idx+1}-{end_idx}) ---")
-        
-        for audio_path in tqdm(batch_files, desc=f"Batch {batch_idx+1}/{num_batches}"):
-            try:
-                # Note: Device is already set during initialization
-                # No need to set again here
-                
-                # Extract 8-D semantic latents (this should use GPU internally)
-                _, z_8d = encoder.encode_from_path(audio_path)
-                
-                # Move to CPU for numpy conversion (keep on GPU until needed)
-                z_8d_np = z_8d.squeeze(0).cpu().numpy()  # (T, 8)
-                
-                # Store as list of lists: [[d1, d2, ..., d8], ...] for each time step
-                embedding_list = z_8d_np.tolist()
-                
-                # Use relative path from AUDIO_BASE_DIR as key
-                rel_path = os.path.relpath(audio_path, AUDIO_BASE_DIR)
-                embeddings_dict[rel_path] = embedding_list
-                
-                # Clear GPU memory immediately
-                del z_8d, z_8d_np
-                if device.startswith("cuda"):
-                    torch.cuda.empty_cache()
-                
-            except Exception as e:
-                logger.error(f"Failed to process {audio_path}: {str(e)}")
-                failed_files.append(audio_path)
-                continue
-        
-        # Log batch progress
-        logger.info(f"Batch {batch_idx + 1} complete: {len(embeddings_dict)}/{total_files} files processed")
-        
-        # Clear GPU cache after each batch
-        if device.startswith("cuda"):
-            torch.cuda.empty_cache()
-            allocated_gb = torch.cuda.memory_allocated(device_id) / 1e9
-            logger.debug(f"GPU memory cleared. Allocated: {allocated_gb:.2f} GB")
+    # Process files
+    for i, audio_path in enumerate(tqdm(files_to_process, desc="Extracting embeddings")):
+        try:
+            # Extract 8-D embeddings
+            _, z_8d = encoder.encode_from_path(audio_path)
             
-            # Log GPU utilization after batch
-            log_gpu_status(device_id, f"After batch {batch_idx + 1}")
+            # Convert to numpy: [1, T, 8] → [T, 8]
+            z_8d_np = z_8d.squeeze(0).cpu().numpy()
+            
+            # Get output path and create directories
+            npy_path = get_embedding_path(audio_path, audio_base_dir, embedding_base_dir)
+            os.makedirs(os.path.dirname(npy_path), exist_ok=True)
+            
+            # Save as NPY
+            np.save(npy_path, z_8d_np)
+            
+            # Track success
+            success_paths.append(audio_path)
+            
+            # Clear GPU memory
+            del z_8d, z_8d_np
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
+            
+        except Exception as e:
+            logger.error(f"Failed to process {audio_path}: {str(e)}")
+            failed_files.append(audio_path)
+            continue
+        
+        # Save progress periodically
+        if (i + 1) % batch_size == 0:
+            save_success_json(success_paths, os.path.join(json_output_dir, SUCCESS_JSON))
+            logger.info(f"Progress: {i + 1}/{len(files_to_process)} files processed")
     
+    # Log failures
     if failed_files:
         logger.warning(f"Failed to process {len(failed_files)} files")
         if len(failed_files) <= 20:
-            logger.warning(f"Failed files: {failed_files}")
-        else:
-            logger.warning(f"Failed files (first 20): {failed_files[:20]}")
-            logger.warning(f"... and {len(failed_files) - 20} more")
+            for f in failed_files:
+                logger.warning(f"  - {f}")
     
-    return embeddings_dict
-
-
-def save_embeddings_json(
-    embeddings_dict: Dict[str, List[List[float]]],
-    output_path: str
-):
-    """
-    Save embeddings dictionary to JSON file.
-    
-    Args:
-        embeddings_dict: Dictionary mapping file paths to embeddings
-        output_path: Path to save JSON file
-    """
-    output_file = Path(output_path)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    logger.info(f"Saving {len(embeddings_dict)} embeddings to {output_path}")
-    
-    with open(output_path, 'w') as f:
-        json.dump(embeddings_dict, f, indent=2)
-    
-    file_size_mb = output_file.stat().st_size / (1024 * 1024)
-    logger.info(f"Saved embeddings JSON ({file_size_mb:.2f} MB)")
+    return success_paths
 
 
 def main():
@@ -256,149 +233,128 @@ def main():
         help=f"Directory containing audio files (default: {AUDIO_BASE_DIR})"
     )
     parser.add_argument(
-        "--output-dir",
+        "--embedding-dir",
         type=str,
-        default=JSON_OUTPUT_DIR,
-        help=f"Directory to save JSON output (default: {JSON_OUTPUT_DIR})"
+        default=EMBEDDING_BASE_DIR,
+        help=f"Directory to save NPY embeddings (default: {EMBEDDING_BASE_DIR})"
     )
     parser.add_argument(
-        "--output-file",
+        "--json-dir",
         type=str,
-        default=SEMANTIC_EMBEDDINGS_JSON,
-        help=f"Output JSON filename (default: {SEMANTIC_EMBEDDINGS_JSON})"
+        default=JSON_OUTPUT_DIR,
+        help=f"Directory to save success JSON (default: {JSON_OUTPUT_DIR})"
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cuda:0" if torch.cuda.is_available() else "cpu",
-        help="Device to run inference on (default: cuda:0 if available, else cpu). Use cuda:0, cuda:1, etc."
+        help="Device for inference (default: cuda:0)"
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=100,
-        help="Number of files to process in each batch before clearing memory (default: 100)"
+        help="Save progress every N files (default: 100)"
     )
     parser.add_argument(
         "--config",
         type=str,
         default="models/tts/metis/config/base.json",
-        help="Path to config file (default: models/tts/metis/config/base.json)"
+        help="Path to config file"
     )
     parser.add_argument(
         "--part",
         type=str,
         default=None,
-        help="Process only specific part directory (e.g., 'part_003'). If None, process all."
+        help="Process only specific part (e.g., 'part_003')"
     )
     parser.add_argument(
         "--max-files",
         type=int,
         default=None,
-        help="Maximum number of files to process (for testing). If None, process all."
+        help="Maximum files to process (for testing)"
     )
     
     args = parser.parse_args()
     
-    # Validate and setup device - FORCE GPU
-    if not torch.cuda.is_available():
-        logger.error("CUDA/GPU is not available! This script requires GPU.")
-        raise RuntimeError("GPU required but not available. Please use a machine with CUDA support.")
+    # Use args for paths (don't modify globals)
+    audio_base_dir = args.audio_dir
+    embedding_base_dir = args.embedding_dir
+    json_output_dir = args.json_dir
     
-    # Use GPU
-    device = args.device if args.device.startswith("cuda") else "cuda:0"
+    # Validate GPU
+    if not torch.cuda.is_available() and args.device.startswith("cuda"):
+        logger.error("CUDA not available! Use --device cpu or run on GPU machine.")
+        sys.exit(1)
     
-    # Set default CUDA device
-    if device.startswith("cuda"):
-        device_id = int(device.split(":")[1]) if ":" in device else 0
-        torch.cuda.set_device(device_id)
-        logger.info(f"Using GPU: {torch.cuda.get_device_name(device_id)}")
-        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(device_id).total_memory / 1e9:.2f} GB")
-        
-        # Log initial GPU status
-        log_gpu_status(device_id, "Initial")
+    device = args.device
+    logger.info(f"Using device: {device}")
     
     # Load config
-    config_path = args.config
-    if not os.path.exists(config_path):
-        logger.error(f"Config file not found: {config_path}")
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+    if not os.path.exists(args.config):
+        logger.error(f"Config file not found: {args.config}")
+        sys.exit(1)
     
-    logger.info(f"Loading configuration from {config_path}...")
-    cfg = load_config(config_path)
+    logger.info(f"Loading configuration from {args.config}")
+    cfg = load_config(args.config)
     
-    # Initialize models - ensure they're on GPU
-    logger.info("\n" + "=" * 70)
-    logger.info("INITIALIZING MODELS ON GPU")
+    # Initialize models
     logger.info("=" * 70)
-    logger.info("(This may take a few minutes on first run as models are downloaded)")
+    logger.info("INITIALIZING MODELS")
+    logger.info("=" * 70)
     
-    try:
-        logger.info("Loading AudioTokenizer...")
-        audio_tokenizer = AudioTokenizer(cfg, device)
-        logger.info("✓ AudioTokenizer loaded on GPU")
-        
-        logger.info("Loading Metis8dEncoder...")
-        encoder = Metis8dEncoder(audio_tokenizer)
-        logger.info("✓ Encoder loaded on GPU")
-        
-        # Verify models are on GPU
-        if device.startswith("cuda"):
-            # Check if encoder components are on GPU
-            encoder_device = next(encoder.semantic_model.parameters()).device
-            logger.info(f"Encoder device: {encoder_device}")
-            if str(encoder_device) != device:
-                logger.warning(f"Encoder may not be on expected device {device}, found {encoder_device}")
-            
-            # Log GPU status after model loading
-            log_gpu_status(device_id, "After model loading")
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize models: {str(e)}")
-        raise
+    logger.info("Loading AudioTokenizer...")
+    audio_tokenizer = AudioTokenizer(cfg, device)
+    logger.info("✓ AudioTokenizer loaded")
+    
+    logger.info("Loading Metis8dEncoder...")
+    encoder = Metis8dEncoder(audio_tokenizer)
+    logger.info("✓ Encoder loaded")
     
     # Find audio files
-    audio_dir = args.audio_dir
-    if args.part:
-        audio_dir = os.path.join(args.audio_dir, args.part)
-        logger.info(f"Processing only: {args.part}")
-    
-    audio_files = find_all_audio_files(audio_dir)
+    audio_files = find_all_audio_files(audio_base_dir, args.part)
     
     if not audio_files:
         logger.error("No audio files found!")
-        return
+        sys.exit(1)
     
     # Limit files if specified
     if args.max_files:
         audio_files = audio_files[:args.max_files]
         logger.info(f"Limited to {len(audio_files)} files for testing")
     
-    # Extract embeddings iteratively in batches
-    embeddings_dict = extract_embeddings_iterative(
+    # Load existing success
+    success_json_path = os.path.join(json_output_dir, SUCCESS_JSON)
+    existing_success = load_existing_success(success_json_path)
+    logger.info(f"Found {len(existing_success)} already processed files")
+    
+    # Process files
+    logger.info("=" * 70)
+    logger.info("EXTRACTING EMBEDDINGS")
+    logger.info("=" * 70)
+    
+    success_paths = process_audio_files(
         encoder,
         audio_files,
+        existing_success,
+        audio_base_dir=audio_base_dir,
+        embedding_base_dir=embedding_base_dir,
+        json_output_dir=json_output_dir,
         batch_size=args.batch_size,
         device=device
     )
     
-    # Save to JSON
-    output_path = os.path.join(args.output_dir, args.output_file)
-    save_embeddings_json(embeddings_dict, output_path)
+    # Save final success JSON
+    save_success_json(success_paths, success_json_path)
     
-    # Log final GPU status
-    if device.startswith("cuda"):
-        device_id = int(device.split(":")[1]) if ":" in device else 0
-        log_gpu_status(device_id, "Final")
-    
+    # Summary
     logger.info("=" * 70)
-    logger.info("✅ EMBEDDING EXTRACTION COMPLETE")
+    logger.info("✅ EXTRACTION COMPLETE")
     logger.info("=" * 70)
-    logger.info(f"Processed: {len(embeddings_dict)} files")
-    logger.info(f"Output: {output_path}")
-    logger.info("=" * 70)
+    logger.info(f"Total successful: {len(success_paths)}")
+    logger.info(f"Embeddings saved to: {embedding_base_dir}")
+    logger.info(f"Success JSON: {success_json_path}")
 
 
 if __name__ == "__main__":
     main()
-

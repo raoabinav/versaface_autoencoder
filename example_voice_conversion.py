@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """
-Simple example script for voice conversion using VersaFace Autoencoder.
+Voice conversion using VersaFace Autoencoder.
 
-Usage:
-    python example_voice_conversion.py --source path/to/source.wav --reference path/to/reference.wav --output output.wav
+Converts speech from a source speaker to sound like a reference speaker
+while preserving the linguistic content.
+
+Example:
+    python example_voice_conversion.py \\
+        --source path/to/source.wav \\
+        --reference path/to/reference.wav \\
+        --output output.wav
+
+The source audio provides "what to say" (content).
+The reference audio provides "how to say it" (style/voice).
+Reference audio should be 1-2 seconds for best results.
 """
 
 import os
@@ -134,8 +144,8 @@ Examples:
     print(f"  Reference duration: ~{prompt_acoustic_code.shape[1] / 50:.2f} seconds")
     
     if prompt_acoustic_code.shape[1] > 100:
-        print(f"  ⚠️  Warning: Reference audio is long. For best results, use 1-2 seconds.")
-        print(f"     Output length will be: ~{z_8d_source.shape[1] - prompt_acoustic_code.shape[1]} tokens")
+        print(f"  ⚠️  Note: Reference audio is longer than 2 seconds.")
+        print(f"     Will be truncated to ~100 tokens for optimal voice conversion.")
 
     print("\n[STEP 3] Converting voice...")
     output_wav = decoder.decode_from_z(z_8d_source, prompt_acoustic_code=prompt_acoustic_code)
