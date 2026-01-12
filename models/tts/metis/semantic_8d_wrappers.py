@@ -229,6 +229,30 @@ class Metis8dEncoder:
             ) from e
 
     @torch.no_grad()
+    def encode_semantic_code_from_path(self, wav_path: str) -> torch.Tensor:
+        """
+        Extract discrete semantic codes from audio file.
+        
+        This extracts the quantized semantic token IDs (0-8191) that the S2A model uses.
+        Use this to get prompt_semantic_code for voice conversion.
+        
+        Args:
+            wav_path: Path to .wav file (any sampling rate, will be resampled to 16kHz)
+            
+        Returns:
+            semantic_code: [1, T] discrete semantic token IDs
+        """
+        if not os.path.exists(wav_path):
+            raise FileNotFoundError(f"Audio file not found: {wav_path}")
+        
+        wav_16k, _ = librosa.load(wav_path, sr=SEMANTIC_SAMPLE_RATE, mono=True)
+        if len(wav_16k) == 0:
+            raise ValueError(f"Audio file is empty: {wav_path}")
+        
+        semantic_code, _ = self.audio_tok.wav2semantic(wav_16k)
+        return semantic_code  # [1, T]
+
+    @torch.no_grad()
     def encode_full_from_path(
         self, wav_path: str
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -255,6 +279,38 @@ class Metis8dEncoder:
         acoustic_code = self.wav2acoustic(wav_24k)
         
         return feat_1024d, z_8d, acoustic_code
+    
+    @torch.no_grad()
+    def encode_prompt_from_path(
+        self, wav_path: str
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract both semantic and acoustic codes for use as a voice conversion prompt.
+        
+        This is the recommended way to prepare reference audio for voice conversion.
+        Returns both codes needed for the S2A model's prompt conditioning.
+        
+        Args:
+            wav_path: Path to reference audio file
+            
+        Returns:
+            prompt_semantic_code: [1, T] discrete semantic token IDs
+            prompt_acoustic_code: [1, T, 12] acoustic codes
+        """
+        if not os.path.exists(wav_path):
+            raise FileNotFoundError(f"Audio file not found: {wav_path}")
+        
+        # Load at both sample rates
+        wav_16k = librosa.load(wav_path, sr=SEMANTIC_SAMPLE_RATE, mono=True)[0]
+        wav_24k = librosa.load(wav_path, sr=ACOUSTIC_SAMPLE_RATE, mono=True)[0]
+        
+        # Extract semantic codes
+        semantic_code, _ = self.audio_tok.wav2semantic(wav_16k)
+        
+        # Extract acoustic codes
+        acoustic_code = self.wav2acoustic(wav_24k)
+        
+        return semantic_code, acoustic_code
 
         
 class Metis8dDecoder:
@@ -370,28 +426,32 @@ class Metis8dDecoder:
         self,
         semantic_code: torch.Tensor,
         prompt_acoustic_code: Optional[torch.Tensor] = None,
+        prompt_semantic_code: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Convert semantic codes to acoustic codes using S2A models.
         
-        Implements standard prompt + semantic design:
+        Implements standard prompt + semantic design (following MaskGCT):
         - semantic_code → embedded as 'cond' (content conditioning)
         - prompt_acoustic_code → concatenated as prefix 'prompt' (style/voice reference)
+        - prompt_semantic_code → prepended to semantic_code for context
         
         The S2A models process: [PROMPT | TARGET] where:
         - PROMPT: Fixed acoustic codes (never masked, provides style)
         - TARGET: Generated acoustic codes (conditioned on semantic + prompt)
         
-        IMPORTANT: The S2A reverse_diffusion calculates target_len = cond.shape[1] - prompt_len.
-        For voice conversion, we want output_len = semantic_len (not semantic_len - prompt_len).
-        So we EXTEND the semantic conditioning by prepending dummy tokens equal to prompt_len.
-        This way: target_len = (semantic_len + prompt_len) - prompt_len = semantic_len ✓
+        The S2A reverse_diffusion calculates target_len = cond.shape[1] - prompt_len.
+        Following MaskGCT, we prepend prompt_semantic_code to provide the model with
+        aligned (semantic, acoustic) context for the reference speaker's voice.
+        This way: target_len = (prompt_len + semantic_len) - prompt_len = semantic_len ✓
         
         Args:
             semantic_code: [1, T_sem] semantic token IDs (content - what to say)
             prompt_acoustic_code: Optional [1, T_prompt, 12] acoustic codes (style - how to say it)
                                   If None, uses empty prompt [1, 0, 12]
-                                  Should be extracted using Metis8dEncoder methods
+            prompt_semantic_code: Optional [1, T_prompt] semantic codes from reference audio
+                                  Provides context showing how this speaker produces speech.
+                                  If None, uses zeros (less optimal but functional).
         
         Returns:
             acoustic_code: [1, T_ac, 12] generated acoustic codes (same length as semantic_code)
@@ -422,23 +482,31 @@ class Metis8dDecoder:
         
         prompt_len = prompt_acoustic_code.shape[1]
         
-        # CRITICAL FIX FOR VOICE CONVERSION:
-        # The S2A model calculates: target_len = cond.shape[1] - prompt_len
-        # For voice conversion, we want: output_len = semantic_len (full source length)
-        # 
-        # Solution: Extend semantic conditioning by prepending dummy tokens
-        # so that: (semantic_len + prompt_len) - prompt_len = semantic_len
-        #
-        # The dummy tokens will be aligned with the acoustic prompt (which is fixed/not generated)
-        # so their exact values don't matter - we use zeros (will be embedded as token 0)
+        # Extend semantic conditioning following MaskGCT design:
+        # Prepend prompt semantic tokens to provide (semantic → acoustic) context
+        # This helps the model learn how this speaker produces speech
         if prompt_len > 0:
-            # Prepend dummy semantic tokens to match prompt length
-            dummy_semantic = torch.zeros(1, prompt_len, device=self.device, dtype=semantic_code.dtype)
-            semantic_code_extended = torch.cat([dummy_semantic, semantic_code], dim=1)
-            logger.debug(
-                f"Extended semantic from {semantic_len} to {semantic_code_extended.shape[1]} tokens "
-                f"(prepended {prompt_len} dummy tokens for prompt alignment)"
-            )
+            if prompt_semantic_code is not None:
+                # Use actual prompt semantic tokens (preferred - provides speaker context)
+                prompt_semantic_code = prompt_semantic_code.to(self.device)
+                if prompt_semantic_code.dim() == 1:
+                    prompt_semantic_code = prompt_semantic_code.unsqueeze(0)
+                # Ensure prompt semantic matches prompt acoustic length
+                if prompt_semantic_code.shape[1] != prompt_len:
+                    prompt_semantic_code = prompt_semantic_code[:, :prompt_len]
+                semantic_code_extended = torch.cat([prompt_semantic_code, semantic_code], dim=1)
+                logger.debug(
+                    f"Extended semantic from {semantic_len} to {semantic_code_extended.shape[1]} tokens "
+                    f"(prepended {prompt_len} reference semantic tokens for speaker context)"
+                )
+            else:
+                # Fallback: use zeros (functional but less optimal)
+                dummy_semantic = torch.zeros(1, prompt_len, device=self.device, dtype=semantic_code.dtype)
+                semantic_code_extended = torch.cat([dummy_semantic, semantic_code], dim=1)
+                logger.debug(
+                    f"Extended semantic from {semantic_len} to {semantic_code_extended.shape[1]} tokens "
+                    f"(prepended {prompt_len} zero tokens - consider providing prompt_semantic_code)"
+                )
         else:
             semantic_code_extended = semantic_code
         
@@ -473,28 +541,32 @@ class Metis8dDecoder:
         self,
         z_8d: torch.Tensor,
         prompt_acoustic_code: Optional[torch.Tensor] = None,
+        prompt_semantic_code: Optional[torch.Tensor] = None,
     ) -> np.ndarray:
         """
         8-D latents [1, T, 8] → waveform [T_wav24]
         
-        This follows the standard prompt + semantic design:
+        This follows the standard prompt + semantic design (from MaskGCT):
         - Semantic codes (from z_8d) provide CONTENT (what to say)
         - Acoustic prompt codes provide STYLE/VOICE (how to say it)
+        - Prompt semantic codes provide CONTEXT (how this speaker produces speech)
         
         The S2A models use:
-        - cond: semantic codes embedded (global conditioning)
+        - cond: [prompt_semantic, source_semantic] embedded (conditioning with context)
         - prompt: acoustic codes concatenated as prefix (style reference)
         
         Args:
             z_8d: [1, T, 8] 8-D continuous latents (content)
-            prompt_acoustic_code: Optional [1, T_prompt, 12] acoustic codes to use as prompt.
-                                 Provides voice/style reference. Should be extracted from
-                                 reference audio using Metis8dEncoder.wav2acoustic() or
-                                 Metis8dEncoder.encode_acoustic_from_path().
+            prompt_acoustic_code: Optional [1, T_prompt, 12] acoustic codes for style.
+                                  Extract using Metis8dEncoder.encode_acoustic_from_path().
+            prompt_semantic_code: Optional [1, T_prompt] semantic codes from reference audio.
+                                  Provides aligned (semantic, acoustic) context for the speaker.
+                                  Extract using Metis8dEncoder.encode_semantic_code_from_path().
+                                  If None, uses zeros (functional but less optimal).
         
         Returns:
             waveform: [T_wav] numpy array at 24kHz
         """
         semantic_code = self._latent8d_to_semantic_ids(z_8d)
-        acoustic_code = self._semantic2acoustic(semantic_code, prompt_acoustic_code)
+        acoustic_code = self._semantic2acoustic(semantic_code, prompt_acoustic_code, prompt_semantic_code)
         return self.audio_tok.code2wav(acoustic_code)

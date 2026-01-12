@@ -138,9 +138,13 @@ Examples:
     _, z_8d_source = encoder.encode_from_path(args.source)
     print(f"✓ 8-D latents shape: {z_8d_source.shape}")
 
-    print("\n[STEP 2] Extracting acoustic codes from reference audio...")
-    prompt_acoustic_code = encoder.encode_acoustic_from_path(args.reference)
-    print(f"✓ Acoustic codes shape: {prompt_acoustic_code.shape}")
+    print("\n[STEP 2] Extracting semantic and acoustic codes from reference audio...")
+    # Following MaskGCT design: extract BOTH semantic and acoustic from reference
+    # - Semantic codes: provide aligned (semantic → acoustic) context for the speaker
+    # - Acoustic codes: provide voice/style reference
+    prompt_semantic_code, prompt_acoustic_code = encoder.encode_prompt_from_path(args.reference)
+    print(f"✓ Prompt semantic codes shape: {prompt_semantic_code.shape}")
+    print(f"✓ Prompt acoustic codes shape: {prompt_acoustic_code.shape}")
     print(f"  Reference duration: ~{prompt_acoustic_code.shape[1] / 50:.2f} seconds")
     
     if prompt_acoustic_code.shape[1] > 100:
@@ -148,7 +152,12 @@ Examples:
         print(f"     Will be truncated to ~100 tokens for optimal voice conversion.")
 
     print("\n[STEP 3] Converting voice...")
-    output_wav = decoder.decode_from_z(z_8d_source, prompt_acoustic_code=prompt_acoustic_code)
+    # Pass both prompt_acoustic_code and prompt_semantic_code for proper conditioning
+    output_wav = decoder.decode_from_z(
+        z_8d_source, 
+        prompt_acoustic_code=prompt_acoustic_code,
+        prompt_semantic_code=prompt_semantic_code
+    )
     print(f"✓ Generated waveform: {len(output_wav)} samples")
     print(f"  Duration: {len(output_wav) / 24000:.2f} seconds")
 
