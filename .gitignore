@@ -62,6 +62,7 @@ pretrained/bigvgan/args.json
 !models/tts/metis/test audios/*.wav
 !models/tts/metis/test_voice_conversion/*.wav
 !models/tts/metis/test_voice_conversion/*.zip
+!models/tts/metis/test_8d_wrapper/*.wav
 
 # Runtime data dirs
 processed_data
