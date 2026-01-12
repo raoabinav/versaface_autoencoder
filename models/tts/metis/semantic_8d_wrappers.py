@@ -382,6 +382,11 @@ class Metis8dDecoder:
         - PROMPT: Fixed acoustic codes (never masked, provides style)
         - TARGET: Generated acoustic codes (conditioned on semantic + prompt)
         
+        IMPORTANT: The S2A reverse_diffusion calculates target_len = cond.shape[1] - prompt_len.
+        For voice conversion, we want output_len = semantic_len (not semantic_len - prompt_len).
+        So we EXTEND the semantic conditioning by prepending dummy tokens equal to prompt_len.
+        This way: target_len = (semantic_len + prompt_len) - prompt_len = semantic_len ✓
+        
         Args:
             semantic_code: [1, T_sem] semantic token IDs (content - what to say)
             prompt_acoustic_code: Optional [1, T_prompt, 12] acoustic codes (style - how to say it)
@@ -389,8 +394,10 @@ class Metis8dDecoder:
                                   Should be extracted using Metis8dEncoder methods
         
         Returns:
-            acoustic_code: [1, T_ac, 12] generated acoustic codes
+            acoustic_code: [1, T_ac, 12] generated acoustic codes (same length as semantic_code)
         """
+        semantic_len = semantic_code.shape[1]
+        
         # Handle prompt: ensure correct shape and dtype
         if prompt_acoustic_code is None:
             prompt_acoustic_code = torch.zeros(1, 0, 12, device=self.device, dtype=torch.long)
@@ -400,54 +407,47 @@ class Metis8dDecoder:
                 prompt_acoustic_code = prompt_acoustic_code.unsqueeze(0)  # [1, T, 12]
             prompt_acoustic_code = prompt_acoustic_code.to(self.device).long()
             
-            # CRITICAL FIX: Ensure prompt is not longer than semantic code
-            # The reverse_diffusion calculates: target_len = cond.shape[1] - prompt_len
-            # So if semantic_len=210 and prompt_len=150, we only get 60 tokens of output!
-            # For voice conversion, prompt should be SHORT (1-2 seconds = 50-100 tokens)
-            # to preserve the full output length
-            semantic_len = semantic_code.shape[1]
+            # Limit prompt length to reasonable maximum (1-2 seconds)
+            # Longer prompts don't improve quality and slow down generation
             prompt_len = prompt_acoustic_code.shape[1]
-            
-            # Use a much shorter prompt (1-2 seconds max) to preserve output length
-            # This ensures: target_len = semantic_len - prompt_len is large enough
-            max_prompt_len = min(
-                MAX_PROMPT_LENGTH_TOKENS, 
-                semantic_len // PROMPT_LENGTH_RATIO
-            )  # Max 2 seconds or 1/3 of semantic length
+            max_prompt_len = min(MAX_PROMPT_LENGTH_TOKENS, semantic_len)
             
             if prompt_len > max_prompt_len:
                 prompt_acoustic_code = prompt_acoustic_code[:, :max_prompt_len, :]
                 prompt_duration = max_prompt_len / SEMANTIC_RATE_HZ
-                logger.warning(
-                    f"Prompt length ({prompt_len} tokens) exceeds recommended maximum "
-                    f"({max_prompt_len} tokens, ~{prompt_duration:.1f}s). "
-                    f"Truncating to preserve output length. "
-                    f"For best results, use a short reference audio (1-2 seconds)."
-                )
-                warnings.warn(
+                logger.info(
                     f"Prompt truncated from {prompt_len} to {max_prompt_len} tokens "
-                    f"(~{prompt_duration:.1f}s) to preserve output length. "
-                    f"Recommended: use 1-2 second reference audio.",
-                    UserWarning,
-                    stacklevel=2
+                    f"(~{prompt_duration:.1f}s). This is normal for voice conversion."
                 )
-            
-            # Final check: ensure we have enough room for output
-            final_prompt_len = prompt_acoustic_code.shape[1]
-            if final_prompt_len >= semantic_len:
-                # If prompt is still too long, use empty prompt
-                prompt_acoustic_code = torch.zeros(1, 0, 12, device=self.device, dtype=torch.long)
-                warnings.warn(
-                    f"Semantic code length ({semantic_len}) is too short for prompt ({final_prompt_len}). "
-                    f"Using empty prompt. Consider using longer source audio."
-                )
-
+        
+        prompt_len = prompt_acoustic_code.shape[1]
+        
+        # CRITICAL FIX FOR VOICE CONVERSION:
+        # The S2A model calculates: target_len = cond.shape[1] - prompt_len
+        # For voice conversion, we want: output_len = semantic_len (full source length)
+        # 
+        # Solution: Extend semantic conditioning by prepending dummy tokens
+        # so that: (semantic_len + prompt_len) - prompt_len = semantic_len
+        #
+        # The dummy tokens will be aligned with the acoustic prompt (which is fixed/not generated)
+        # so their exact values don't matter - we use zeros (will be embedded as token 0)
+        if prompt_len > 0:
+            # Prepend dummy semantic tokens to match prompt length
+            dummy_semantic = torch.zeros(1, prompt_len, device=self.device, dtype=semantic_code.dtype)
+            semantic_code_extended = torch.cat([dummy_semantic, semantic_code], dim=1)
+            logger.debug(
+                f"Extended semantic from {semantic_len} to {semantic_code_extended.shape[1]} tokens "
+                f"(prepended {prompt_len} dummy tokens for prompt alignment)"
+            )
+        else:
+            semantic_code_extended = semantic_code
+        
         # Stage 1: Coarse prediction (1 quantizer)
         # cond: semantic codes embedded → provides content
         # prompt: acoustic codes as prefix → provides style
         predict_1layer = self.s2a_model_1layer.reverse_diffusion(
-            cond=self.s2a_model_1layer.cond_emb(semantic_code),  # Content conditioning
-            prompt=prompt_acoustic_code,                          # Style prefix
+            cond=self.s2a_model_1layer.cond_emb(semantic_code_extended),  # Extended conditioning
+            prompt=prompt_acoustic_code,                                   # Style prefix
             temp=1.5,
             filter_thres=0.98,
             n_timesteps=[40],
@@ -458,8 +458,8 @@ class Metis8dDecoder:
         # Stage 2: Refined prediction (12 quantizers)
         # Uses stage 1 output as gt_code for better quality
         return self.s2a_model_full.reverse_diffusion(
-            cond=self.s2a_model_full.cond_emb(semantic_code),  # Content conditioning
-            prompt=prompt_acoustic_code,                        # Style prefix
+            cond=self.s2a_model_full.cond_emb(semantic_code_extended),  # Extended conditioning
+            prompt=prompt_acoustic_code,                                 # Style prefix
             temp=1.5,
             filter_thres=0.98,
             n_timesteps=[40, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],

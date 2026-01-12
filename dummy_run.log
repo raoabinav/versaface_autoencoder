@@ -1,120 +1,0 @@
-2026-01-08 00:36:18,192 - INFO - Using GPU: NVIDIA RTX 6000 Ada Generation
-2026-01-08 00:36:18,192 - INFO - GPU Memory: 51.00 GB
-2026-01-08 00:36:18,337 - INFO - GPU Status [Initial]: Util=0%, Mem=0% (1023 MB/49140 MB), Temp=42°C
-2026-01-08 00:36:18,338 - INFO - Loading configuration from models/tts/metis/config/base.json...
-2026-01-08 00:36:18,512 - INFO - 
-======================================================================
-2026-01-08 00:36:18,523 - INFO - INITIALIZING MODELS ON GPU (DUMMY TEST)
-2026-01-08 00:36:18,523 - INFO - ======================================================================
-2026-01-08 00:36:18,524 - INFO - Loading AudioTokenizer...
-2026-01-08 00:36:18,524 - INFO - Initializing AudioTokenizer on device: cuda:0
-/data/abi/miniconda3/envs/versaface/lib/python3.12/site-packages/huggingface_hub/file_download.py:942: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
-  warnings.warn(
-/home/abi/repos/versaface_autoencoder/models/tts/maskgct/maskgct_utils.py:71: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
-  stat_mean_var = torch.load(stats_path)
-/data/abi/miniconda3/envs/versaface/lib/python3.12/site-packages/torch/nn/utils/weight_norm.py:143: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
-  WeightNorm.apply(module, name, dim)
-2026-01-08 00:37:11,028 - INFO - Downloading semantic codec checkpoint...
-Fetching 1 files:   0%|          | 0/1 [00:00<?, ?it/s]Fetching 1 files: 100%|██████████| 1/1 [00:00<00:00, 10538.45it/s]
-2026-01-08 00:38:11,987 - INFO - Downloading acoustic codec checkpoints...
-Fetching 1 files:   0%|          | 0/1 [00:00<?, ?it/s]Fetching 1 files: 100%|██████████| 1/1 [00:00<00:00, 159.92it/s]
-Fetching 1 files:   0%|          | 0/1 [00:00<?, ?it/s]Fetching 1 files: 100%|██████████| 1/1 [00:00<00:00, 131.66it/s]
-2026-01-08 00:38:13,018 - INFO - ✓ AudioTokenizer loaded
-2026-01-08 00:38:13,035 - INFO - Loading Metis8dEncoder...
-2026-01-08 00:38:13,040 - INFO - ✓ Encoder loaded
-2026-01-08 00:38:13,041 - INFO - Encoder device: cuda:0
-2026-01-08 00:38:13,171 - INFO - GPU Status [After model loading]: Util=9%, Mem=1% (5199 MB/49140 MB), Temp=42°C
-2026-01-08 00:38:13,171 - INFO - 
-Finding 30 sample audio files...
-2026-01-08 00:38:13,366 - INFO - Found 30 sample audio files in /data/common/versaface/audios
-2026-01-08 00:38:13,366 - INFO - Will process 30 files
-2026-01-08 00:38:13,366 - INFO - Using GPU: NVIDIA RTX 6000 Ada Generation
-2026-01-08 00:38:13,366 - INFO - GPU Memory: 51.00 GB
-2026-01-08 00:38:13,366 - INFO - Processing 30 audio files in 3 batches (batch_size=10)
-2026-01-08 00:38:13,366 - INFO - Device: cuda:0
-2026-01-08 00:38:13,589 - INFO - GPU Status [Before processing]: Util=1%, Mem=0% (5199 MB/49140 MB), Temp=42°C
-2026-01-08 00:38:13,589 - INFO - 
---- Batch 1/3 (files 1-10) ---
-Batch 1/3:   0%|          | 0/10 [00:00<?, ?it/s]Batch 1/3:  10%|█         | 1/10 [00:10<01:32, 10.29s/it]Batch 1/3:  20%|██        | 2/10 [00:10<00:36,  4.58s/it]Batch 1/3:  30%|███       | 3/10 [00:10<00:17,  2.55s/it]Batch 1/3:  40%|████      | 4/10 [00:11<00:09,  1.65s/it]Batch 1/3:  50%|█████     | 5/10 [00:11<00:05,  1.16s/it]Batch 1/3:  60%|██████    | 6/10 [00:11<00:03,  1.23it/s]Batch 1/3:  70%|███████   | 7/10 [00:11<00:01,  1.56it/s]Batch 1/3:  80%|████████  | 8/10 [00:12<00:01,  1.97it/s]Batch 1/3:  90%|█████████ | 9/10 [00:12<00:00,  2.21it/s]Batch 1/3: 100%|██████████| 10/10 [00:12<00:00,  2.57it/s]Batch 1/3: 100%|██████████| 10/10 [00:12<00:00,  1.28s/it]
-2026-01-08 00:38:26,390 - INFO - Batch 1 complete: 10/30 files processed
-2026-01-08 00:38:26,457 - INFO - GPU Status [After batch 1]: Util=6%, Mem=2% (4715 MB/49140 MB), Temp=43°C
-2026-01-08 00:38:26,457 - INFO - 
---- Batch 2/3 (files 11-20) ---
-quantized_out: torch.Size([1, 1024, 118])
-all_indices: torch.Size([1, 1, 118])
-quantized_out: torch.Size([1, 1024, 562])
-all_indices: torch.Size([1, 1, 562])
-quantized_out: torch.Size([1, 1024, 102])
-all_indices: torch.Size([1, 1, 102])
-quantized_out: torch.Size([1, 1024, 153])
-all_indices: torch.Size([1, 1, 153])
-quantized_out: torch.Size([1, 1024, 137])
-all_indices: torch.Size([1, 1, 137])
-quantized_out: torch.Size([1, 1024, 124])
-all_indices: torch.Size([1, 1, 124])
-quantized_out: torch.Size([1, 1024, 140])
-all_indices: torch.Size([1, 1, 140])
-quantized_out: torch.Size([1, 1024, 143])
-all_indices: torch.Size([1, 1, 143])
-quantized_out: torch.Size([1, 1024, 121])
-all_indices: torch.Size([1, 1, 121])
-quantized_out: torch.Size([1, 1024, 105])
-all_indices: torch.Size([1, 1, 105])
-Batch 2/3:   0%|          | 0/10 [00:00<?, ?it/s]Batch 2/3:  10%|█         | 1/10 [00:00<00:03,  2.94it/s]Batch 2/3:  20%|██        | 2/10 [00:00<00:02,  3.33it/s]Batch 2/3:  30%|███       | 3/10 [00:00<00:02,  3.17it/s]Batch 2/3:  40%|████      | 4/10 [00:01<00:01,  3.50it/s]Batch 2/3:  50%|█████     | 5/10 [00:01<00:01,  3.40it/s]Batch 2/3:  60%|██████    | 6/10 [00:01<00:01,  2.85it/s]Batch 2/3:  70%|███████   | 7/10 [00:02<00:01,  2.55it/s]Batch 2/3:  80%|████████  | 8/10 [00:03<00:00,  2.15it/s]Batch 2/3:  90%|█████████ | 9/10 [00:03<00:00,  2.11it/s]Batch 2/3: 100%|██████████| 10/10 [00:03<00:00,  2.41it/s]Batch 2/3: 100%|██████████| 10/10 [00:03<00:00,  2.61it/s]
-2026-01-08 00:38:30,286 - INFO - Batch 2 complete: 20/30 files processed
-2026-01-08 00:38:30,427 - INFO - GPU Status [After batch 2]: Util=5%, Mem=2% (4717 MB/49140 MB), Temp=43°C
-2026-01-08 00:38:30,427 - INFO - 
---- Batch 3/3 (files 21-30) ---
-quantized_out: torch.Size([1, 1024, 335])
-all_indices: torch.Size([1, 1, 335])
-quantized_out: torch.Size([1, 1024, 217])
-all_indices: torch.Size([1, 1, 217])
-quantized_out: torch.Size([1, 1024, 418])
-all_indices: torch.Size([1, 1, 418])
-quantized_out: torch.Size([1, 1024, 233])
-all_indices: torch.Size([1, 1, 233])
-quantized_out: torch.Size([1, 1024, 185])
-all_indices: torch.Size([1, 1, 185])
-quantized_out: torch.Size([1, 1024, 130])
-all_indices: torch.Size([1, 1, 130])
-quantized_out: torch.Size([1, 1024, 230])
-all_indices: torch.Size([1, 1, 230])
-quantized_out: torch.Size([1, 1024, 220])
-all_indices: torch.Size([1, 1, 220])
-quantized_out: torch.Size([1, 1024, 217])
-all_indices: torch.Size([1, 1, 217])
-quantized_out: torch.Size([1, 1024, 118])
-all_indices: torch.Size([1, 1, 118])
-Batch 3/3:   0%|          | 0/10 [00:00<?, ?it/s]Batch 3/3:  10%|█         | 1/10 [00:00<00:05,  1.61it/s]Batch 3/3:  20%|██        | 2/10 [00:01<00:05,  1.45it/s]Batch 3/3:  30%|███       | 3/10 [00:02<00:04,  1.42it/s]Batch 3/3:  40%|████      | 4/10 [00:02<00:04,  1.36it/s]Batch 3/3:  50%|█████     | 5/10 [00:03<00:03,  1.56it/s]Batch 3/3:  60%|██████    | 6/10 [00:03<00:02,  1.57it/s]Batch 3/3:  70%|███████   | 7/10 [00:04<00:01,  1.57it/s]Batch 3/3:  80%|████████  | 8/10 [00:05<00:01,  1.73it/s]Batch 3/3:  90%|█████████ | 9/10 [00:05<00:00,  1.57it/s]Batch 3/3: 100%|██████████| 10/10 [00:06<00:00,  1.52it/s]Batch 3/3: 100%|██████████| 10/10 [00:06<00:00,  1.53it/s]
-2026-01-08 00:38:36,950 - INFO - Batch 3 complete: 30/30 files processed
-2026-01-08 00:38:37,165 - INFO - GPU Status [After batch 3]: Util=3%, Mem=1% (4715 MB/49140 MB), Temp=43°C
-2026-01-08 00:38:37,166 - INFO - Saving 30 embeddings to /data/common/versaface/jsons/semantic_audio_embeddings_dummy.json
-quantized_out: torch.Size([1, 1024, 226])
-all_indices: torch.Size([1, 1, 226])
-quantized_out: torch.Size([1, 1024, 284])
-all_indices: torch.Size([1, 1, 284])
-quantized_out: torch.Size([1, 1024, 134])
-all_indices: torch.Size([1, 1, 134])
-quantized_out: torch.Size([1, 1024, 287])
-all_indices: torch.Size([1, 1, 287])
-quantized_out: torch.Size([1, 1024, 102])
-all_indices: torch.Size([1, 1, 102])
-quantized_out: torch.Size([1, 1024, 169])
-all_indices: torch.Size([1, 1, 169])
-quantized_out: torch.Size([1, 1024, 111])
-all_indices: torch.Size([1, 1, 111])
-quantized_out: torch.Size([1, 1024, 102])
-all_indices: torch.Size([1, 1, 102])
-quantized_out: torch.Size([1, 1024, 370])
-all_indices: torch.Size([1, 1, 370])
-quantized_out: torch.Size([1, 1024, 262])
-all_indices: torch.Size([1, 1, 262])
-Traceback (most recent call last):
-  File "/home/abi/repos/versaface_autoencoder/extract_audio_embeddings_dummy.py", line 338, in <module>
-    main()
-  File "/home/abi/repos/versaface_autoencoder/extract_audio_embeddings_dummy.py", line 322, in main
-    save_embeddings_json(embeddings_dict, output_path)
-  File "/home/abi/repos/versaface_autoencoder/extract_audio_embeddings_dummy.py", line 200, in save_embeddings_json
-    with open(output_path, 'w') as f:
-         ^^^^^^^^^^^^^^^^^^^^^^
-PermissionError: [Errno 13] Permission denied: '/data/common/versaface/jsons/semantic_audio_embeddings_dummy.json'
